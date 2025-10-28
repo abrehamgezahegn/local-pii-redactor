@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import sys
 import threading
 from pathlib import Path
 
+import pypdfium2 as pdfium
 from PIL import Image
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QObject, QSaveFile, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
@@ -23,6 +25,8 @@ LANGUAGE = os.environ.get("PII_LANGUAGE", "eng")
 TEXT_FILES = {".txt", ".md", ".csv", ".log", ".json", ".eml"}
 TYPING_PAUSE_MS = 1200
 PAGES = {"empty": 0, "image": 1, "text": 2}
+MAX_PDF_PAGES = 50
+PDF_RENDER_DPI = 200
 
 
 def scan_image(image: Image.Image) -> dict:
@@ -32,6 +36,52 @@ def scan_image(image: Image.Image) -> dict:
     if not any(region["boxes"] for region in result["regions"]):
         raise RedactionError("No personal information was detected. Check the image yourself or try a clearer image.")
     return result
+
+
+def render_pdf_pages(data: bytes) -> list[Image.Image]:
+    """Render each page of a PDF to an RGB image, enforcing page and pixel limits."""
+    document = pdfium.PdfDocument(data)
+    count = len(document)
+    if count > MAX_PDF_PAGES:
+        raise RedactionError(f"PDFs can have at most {MAX_PDF_PAGES} pages. This one has {count}.")
+    pages = []
+    for i in range(count):
+        page = document[i]
+        bitmap = page.render(scale=PDF_RENDER_DPI / 72)
+        image = bitmap.to_pil().convert("RGB")
+        if image.width * image.height > MAX_PIXELS:
+            raise RedactionError(f"Page {i + 1} is too large to process. Use a PDF with smaller pages.")
+        pages.append(image)
+    return pages
+
+
+def make_pdf(page_images: list[Image.Image]) -> bytes:
+    """Create a new PDF from page images, with no text layer, metadata or annotations."""
+    buffer = io.BytesIO()
+    if len(page_images) == 1:
+        page_images[0].save(buffer, format="PDF")
+    else:
+        page_images[0].save(buffer, format="PDF", save_all=True, append_images=page_images[1:])
+    return buffer.getvalue()
+
+
+def scan_pdf_page(image: Image.Image) -> dict:
+    """Scan a PDF page; tolerate pages with no PII, but fail if the model is unavailable and patterns found nothing."""
+    result = analyze(image, MODEL, LANGUAGE)
+    if not result["complete"] and not any(r["boxes"] for r in result["regions"]):
+        raise RedactionError(" ".join(result["warnings"]) + " The PDF could not be processed.")
+    return result
+
+
+def render_pdf_page(image: Image.Image, analysis: dict, mode: str, faker: Faker) -> tuple[bytes, int, str]:
+    regions = [Region(**region) for region in analysis["regions"]]
+    if not regions:
+        return png_bytes(image), 0, " ".join(analysis["warnings"])
+    if mode == "anonymize":
+        output = anonymize_image(image, regions, faker, padding=5)
+    else:
+        output = redact(image, [box for region in regions for box in region.boxes], padding=5)
+    return png_bytes(output), len(regions), " ".join(analysis["warnings"])
 
 
 def render_image(image: Image.Image, analysis: dict, mode: str, faker: Faker) -> tuple[bytes, int, str]:
@@ -153,6 +203,13 @@ class RedactorWindow(QWidget):
         self.source: Image.Image | None = None
         self.source_png: bytes | None = None
         self.source_path: Path | None = None
+        self.is_pdf = False
+        self.pdf_pages: list[Image.Image] | None = None
+        self.pdf_page_results: list[bytes] | None = None
+        self.pdf_analyses: list[dict] | None = None
+        self.pdf_current_page = 0
+        self.pdf_done = False
+        self.pdf_path: Path | None = None
         self.image_analysis: dict | None = None
         self.image_faker = Faker()
         self.result_data: bytes | None = None
@@ -403,10 +460,24 @@ class RedactorWindow(QWidget):
             if path.suffix.lower() in TEXT_FILES:
                 self.load_text(path.read_text(encoding="utf-8", errors="replace"))
                 return
+            if path.suffix.lower() == ".pdf":
+                self.load_pdf(path.read_bytes(), path.name, path)
+                return
             image = load_image(path.read_bytes())
             self.set_source(image, path.name, path)
         except (RedactionError, OSError) as error:
             self.say(str(error), error=True)
+
+    def load_pdf(self, data: bytes, name: str, path: Path | None = None):
+        pages = render_pdf_pages(data)
+        self.is_pdf = True
+        self.pdf_pages = pages
+        self.pdf_path = path
+        self.pdf_current_page = 0
+        self.pdf_page_results = [None] * len(pages)
+        self.pdf_analyses = [None] * len(pages)
+        self.pdf_done = False
+        self.set_source(pages[0], name, path)
 
     def set_source(self, image: Image.Image, name: str, path: Path | None = None, scan: bool = True):
         self.source = image
