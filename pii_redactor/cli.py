@@ -4,12 +4,14 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__
 from .core import Box, RedactionError, load_image, png_bytes, redact
 from .pipeline import analyze
 
 
 def main():
     parser = argparse.ArgumentParser(description="Redact image PII locally with Ollama, Tesseract and Pillow.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("desktop", help="Open the desktop app")
     run = commands.add_parser("redact", help="Automatically redact a single image; review the result before sharing")
