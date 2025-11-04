@@ -118,6 +118,7 @@ def image_fingerprint(image: QImage) -> str:
 class WorkerSignals(QObject):
     scanned = Signal(int, str, object)
     failed = Signal(int, str, str)
+    progress = Signal(str)
 
 
 class UploadArea(QPushButton):
@@ -229,6 +230,7 @@ class RedactorWindow(QWidget):
         self.signals = WorkerSignals(self)
         self.signals.scanned.connect(self.scanned)
         self.signals.failed.connect(self.failed)
+        self.signals.progress.connect(self.on_progress)
         self.typing_timer = QTimer(self)
         self.typing_timer.setSingleShot(True)
         self.typing_timer.setInterval(TYPING_PAUSE_MS)
@@ -479,6 +481,23 @@ class RedactorWindow(QWidget):
         self.pdf_done = False
         self.set_source(pages[0], name, path)
 
+    def show_pdf_page(self, index: int):
+        if not self.pdf_pages or not (0 <= index < len(self.pdf_pages)):
+            return
+        self.pdf_current_page = index
+        self.source = self.pdf_pages[index]
+        self.source_png = png_bytes(self.source)
+        if self.pdf_page_results and self.pdf_page_results[index] is not None:
+            self.result_data = self.pdf_page_results[index]
+            self.upload.show_image(self.result_data)
+        else:
+            self.result_data = None
+            self.upload.show_image(self.source_png)
+        if len(self.pdf_pages) > 1:
+            self.page_label.setText(f"Page {index + 1} of {len(self.pdf_pages)}")
+        self.prev_button.setEnabled(index > 0)
+        self.next_button.setEnabled(index < len(self.pdf_pages) - 1)
+
     def set_source(self, image: Image.Image, name: str, path: Path | None = None, scan: bool = True):
         self.source = image
         self.source_png = png_bytes(image)
@@ -675,6 +694,9 @@ class RedactorWindow(QWidget):
     def start_scan(self):
         self.typing_timer.stop()
         kind = self.kind
+        if kind == "image" and self.is_pdf:
+            self.start_pdf_scan()
+            return
         if kind == "image" and self.source is not None:
             self.image_analysis = None
             self.result_data = None
@@ -712,12 +734,78 @@ class RedactorWindow(QWidget):
 
         self.launch(work)
 
+    def start_pdf_scan(self):
+        if not self.pdf_pages:
+            return
+        self.pdf_done = False
+        self.result_data = None
+        self.upload.show_image(self.source_png)
+        self.say("Finding personal information on this computer…")
+        self.generation += 1
+        generation = self.generation
+        pages = [p.copy() for p in self.pdf_pages]
+        mode = self.mode
+        faker = Faker()
+        signals, closed = self.signals, self.closed
+
+        def work():
+            try:
+                results, analyses = [], []
+                total_count, warnings = 0, []
+                for i, page in enumerate(pages):
+                    if closed.is_set():
+                        return
+                    signals.progress.emit(f"Page {i + 1} of {len(pages)}…")
+                    analysis = scan_pdf_page(page)
+                    data, count, warning = render_pdf_page(page, analysis, mode, faker)
+                    results.append(data)
+                    analyses.append(analysis)
+                    total_count += count
+                    if warning:
+                        warnings.append(warning)
+                if not closed.is_set():
+                    signals.scanned.emit(generation, "pdf", {
+                        "results": results, "analyses": analyses,
+                        "count": total_count, "warnings": " ".join(warnings),
+                    })
+            except (RedactionError, OSError) as error:
+                if not closed.is_set():
+                    signals.failed.emit(generation, "pdf", str(error))
+            except Exception:
+                if not closed.is_set():
+                    signals.failed.emit(generation, "pdf", "The PDF could not be processed. Check that Ollama is running.")
+
+        self.busy = True
+        self.refresh()
+        self.launch(work)
+
+    def on_progress(self, message: str):
+        if self.busy:
+            self.say(message)
+
     def scanned(self, generation: int, kind: str, analysis: dict):
-        if generation != self.generation or kind != self.kind:
+        if generation != self.generation:
+            return
+        if kind == "pdf":
+            if not self.is_pdf:
+                return
+        elif kind != self.kind:
             return  # the input changed while this scan ran
         self.busy = False
         try:
-            if kind == "image":
+            if kind == "pdf":
+                self.pdf_page_results = analysis["results"]
+                self.pdf_analyses = analysis["analyses"]
+                self.image_faker = Faker()
+                self.pdf_done = True
+                self.result_count = analysis["count"]
+                self.result_warning = analysis["warnings"]
+                self.show_pdf_page(0)
+                self.refresh()
+                if self.auto_copy:
+                    self.copy_to_clipboard()
+                self.say(self.summary(analysis["count"], "regions", analysis["warnings"]))
+            elif kind == "image":
                 self.image_analysis = analysis
                 self.image_faker = Faker()
                 self.show_result(*render_image(self.source, analysis, self.mode, self.image_faker))
