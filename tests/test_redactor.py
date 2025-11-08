@@ -160,6 +160,24 @@ def test_reject_empty_out_of_bounds_and_animated_images():
         load_image(data.getvalue())
 
 
+@pytest.mark.parametrize("padding", [-1, 41, 100])
+def test_redact_rejects_padding_out_of_range(padding):
+    image = Image.new("RGB", (50, 50))
+    box = Box(x=0, y=0, width=10, height=10)
+    with pytest.raises(RedactionError, match="Padding"):
+        redact(image, [box], padding=padding)
+
+
+def test_redact_with_zero_padding_covers_exact_box():
+    image = Image.new("RGB", (50, 50), "white")
+    box = Box(x=10, y=10, width=20, height=20)
+    output = redact(image, [box], padding=0)
+    assert output.getpixel((10, 10)) == (0, 0, 0)
+    assert output.getpixel((29, 29)) == (0, 0, 0)
+    assert output.getpixel((9, 10)) == (255, 255, 255)
+    assert output.getpixel((30, 10)) == (255, 255, 255)
+
+
 def glyph_line():
     """'birth:' at x 171-234, a thin '1' at 246-254, then '992-04-18' at 261-392 (the sample's real ink layout)."""
     image = Image.new("L", (420, 40), 255)
