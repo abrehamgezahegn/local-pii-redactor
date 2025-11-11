@@ -289,6 +289,22 @@ class RedactorWindow(QWidget):
 
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
+        self.prev_button = QPushButton("\u2039")
+        self.prev_button.setToolTip("Previous page")
+        self.prev_button.setFixedWidth(32)
+        self.prev_button.clicked.connect(lambda: self.show_pdf_page(self.pdf_current_page - 1))
+        self.prev_button.hide()
+        bottom.addWidget(self.prev_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.page_label = QLabel("")
+        self.page_label.setObjectName("hint")
+        self.page_label.hide()
+        bottom.addWidget(self.page_label, 0, Qt.AlignmentFlag.AlignTop)
+        self.next_button = QPushButton("\u203a")
+        self.next_button.setToolTip("Next page")
+        self.next_button.setFixedWidth(32)
+        self.next_button.clicked.connect(lambda: self.show_pdf_page(self.pdf_current_page + 1))
+        self.next_button.hide()
+        bottom.addWidget(self.next_button, 0, Qt.AlignmentFlag.AlignTop)
         self.status = QLabel("")
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
@@ -347,6 +363,7 @@ class RedactorWindow(QWidget):
             (QKeySequence.StandardKey.New, self.new), (QKeySequence("Ctrl+Return"), self.start_scan),
             (QKeySequence("Ctrl+Meta+F" if sys.platform == "darwin" else "F11"), self.toggle_fullscreen),
             (QKeySequence("Esc"), self.exit_fullscreen),
+            (QKeySequence("Ctrl+Left"), self.prev_page), (QKeySequence("Ctrl+Right"), self.next_page),
         ]
         self.shortcuts = []
         for key, action in shortcuts:
@@ -435,6 +452,12 @@ class RedactorWindow(QWidget):
         self.copy_button.setVisible(result)
         self.save_button.setVisible(result)
         self.progress.setVisible(self.busy)
+        nav = self.is_pdf and self.pdf_pages and len(self.pdf_pages) > 1 and not self.busy
+        self.prev_button.setVisible(nav)
+        self.next_button.setVisible(nav)
+        self.page_label.setVisible(nav)
+        if nav:
+            self.page_label.setText(f"Page {self.pdf_current_page + 1} of {len(self.pdf_pages)}")
         if not self.busy and self.kind == "empty" and not self.status.property("tone"):
             self.status.setText("Processed on this computer with Llama. Review results before sharing.")
 
@@ -450,7 +473,7 @@ class RedactorWindow(QWidget):
 
     # ---------- input ----------
     def choose_image(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Choose an image or text file", "", "Images and text (*.png *.jpg *.jpeg *.heic *.heif *.avif *.webp *.gif *.bmp *.tif *.tiff *.txt *.md)")
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose an image or text file", "", "Images, text and PDF (*.png *.jpg *.jpeg *.heic *.heif *.avif *.webp *.gif *.bmp *.tif *.tiff *.txt *.md *.pdf)")
         if filename:
             self.load_file(filename)
 
@@ -782,6 +805,14 @@ class RedactorWindow(QWidget):
     def on_progress(self, message: str):
         if self.busy:
             self.say(message)
+
+    def prev_page(self):
+        if self.is_pdf:
+            self.show_pdf_page(self.pdf_current_page - 1)
+
+    def next_page(self):
+        if self.is_pdf:
+            self.show_pdf_page(self.pdf_current_page + 1)
 
     def scanned(self, generation: int, kind: str, analysis: dict):
         if generation != self.generation:
