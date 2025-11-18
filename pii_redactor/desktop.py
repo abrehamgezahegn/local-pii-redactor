@@ -441,6 +441,8 @@ class RedactorWindow(QWidget):
         self.refresh()
 
     def has_result(self) -> bool:
+        if self.is_pdf:
+            return self.pdf_done
         if self.kind == "image":
             return self.result_data is not None
         if self.kind == "text":
@@ -683,6 +685,17 @@ class RedactorWindow(QWidget):
         self.mode = mode
         self.settings.setValue("mode", mode)
         # Reuse the last scan: switching modes re-renders instantly without asking the model again.
+        if self.is_pdf and self.pdf_pages and self.pdf_analyses:
+            faker = Faker()
+            self.pdf_page_results = []
+            for i, page in enumerate(self.pdf_pages):
+                if self.pdf_analyses[i] is not None:
+                    data, count, warning = render_pdf_page(page, self.pdf_analyses[i], mode, faker)
+                    self.pdf_page_results.append(data)
+                else:
+                    self.pdf_page_results.append(None)
+            self.image_faker = faker
+            self.show_pdf_page(self.pdf_current_page)
         if self.image_analysis is not None and self.source is not None:
             self.show_result(*render_image(self.source, self.image_analysis, mode, self.image_faker))
         if self.text_analysis is not None:
@@ -699,6 +712,13 @@ class RedactorWindow(QWidget):
         self.busy = False
         self.typing_timer.stop()
         self.source = self.source_png = self.source_path = self.image_analysis = self.result_data = None
+        self.is_pdf = False
+        self.pdf_pages = None
+        self.pdf_page_results = None
+        self.pdf_analyses = None
+        self.pdf_current_page = 0
+        self.pdf_done = False
+        self.pdf_path = None
         self.loading_text = True
         self.text_input.clear()
         self.loading_text = False
@@ -894,12 +914,18 @@ class RedactorWindow(QWidget):
     def show_original(self):
         if self.result_data is not None and self.source_png is not None:
             self.upload.show_image(self.source_png)
-            self.filename.setText("Original · Release to see the result")
+            if self.is_pdf:
+                self.filename.setText(f"Original · Page {self.pdf_current_page + 1} of {len(self.pdf_pages)} · Release to see the result")
+            else:
+                self.filename.setText("Original · Release to see the result")
 
     def show_processed(self):
         if self.result_data is not None:
             self.upload.show_image(self.result_data)
-            self.filename.setText(f"{self.verb().capitalize()} preview · Hold to compare with the original · Double-click for full screen")
+            if self.is_pdf:
+                self.filename.setText(f"{self.verb().capitalize()} preview · Page {self.pdf_current_page + 1} of {len(self.pdf_pages)} · Hold to compare with the original · Double-click for full screen")
+            else:
+                self.filename.setText(f"{self.verb().capitalize()} preview · Hold to compare with the original · Double-click for full screen")
 
     def copy_to_clipboard(self) -> bool:
         if self.kind == "image" and self.result_data is not None:
@@ -915,7 +941,8 @@ class RedactorWindow(QWidget):
     def copy_result(self):
         if self.copy_to_clipboard():
             warning = self.result_warning if self.kind == "image" else self.text_warning
-            self.say(f"Copied the {self.verb()} {self.kind}, ready to paste. {warning}")
+            noun = "page" if self.is_pdf else self.kind
+            self.say(f"Copied the {self.verb()} {noun}, ready to paste. {warning}")
 
     def toggle_fullscreen(self):
         if self.kind != "image":
@@ -937,7 +964,9 @@ class RedactorWindow(QWidget):
 
     # ---------- saving ----------
     def save_current(self):
-        if self.kind == "image" and self.result_data is not None:
+        if self.is_pdf and self.pdf_done:
+            self.save_pdf()
+        elif self.kind == "image" and self.result_data is not None:
             self.save_result(self.result_data, self.result_count)
         elif self.kind == "text" and self.result_text is not None:
             self.save_text(self.result_text, self.text_count)
@@ -952,7 +981,10 @@ class RedactorWindow(QWidget):
             raise RedactionError("Saving failed. Choose Save to try another location.")
 
     def default_name(self, suffix: str) -> str:
-        stem = self.source_path.stem if self.source_path else ("image" if suffix == ".png" else "text")
+        if self.is_pdf:
+            stem = self.pdf_path.stem if self.pdf_path else "document"
+        else:
+            stem = self.source_path.stem if self.source_path else ("image" if suffix == ".png" else "text")
         return str(Path(self.settings.value("save_dir", str(Path.home() / "Downloads"))) / f"{stem}-{self.verb()}{suffix}")
 
     def save_result(self, data: bytes, count: int):
@@ -985,6 +1017,26 @@ class RedactorWindow(QWidget):
             self._write(path, text.encode("utf-8"))
             self.settings.setValue("save_dir", str(path.parent))
             self.say(f"Saved {path.name} with {count} replaced values. {self.text_warning}")
+        except (RedactionError, OSError) as error:
+            self.say(str(error), error=True)
+
+    def save_pdf(self):
+        filename, _ = QFileDialog.getSaveFileName(self, "Save PDF", self.default_name(".pdf"), "PDF document (*.pdf)")
+        if not filename:
+            self.say("Nothing was saved. The result is still here.")
+            return
+        path = Path(filename)
+        try:
+            if path.suffix.lower() != ".pdf":
+                raise RedactionError("Use a filename ending in .pdf.")
+            if self.pdf_path and path.resolve() == self.pdf_path.resolve():
+                raise RedactionError("Choose a different filename to preserve your original PDF.")
+            page_images = [Image.open(io.BytesIO(data)) for data in self.pdf_page_results]
+            pdf_bytes = make_pdf(page_images)
+            self._write(path, pdf_bytes)
+            self.settings.setValue("save_dir", str(path.parent))
+            changes = "replacements" if self.mode == "anonymize" else "redactions"
+            self.say(f"Saved {path.name} with {self.result_count} {changes} across {len(self.pdf_page_results)} pages. {self.result_warning}")
         except (RedactionError, OSError) as error:
             self.say(str(error), error=True)
 
