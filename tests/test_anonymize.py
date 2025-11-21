@@ -155,3 +155,33 @@ def test_merge_handles_nested_and_adjacent_spans():
 def test_rule_spans_trim_whitespace():
     text = "Passport: AB1234567   "
     assert [text[s.start:s.end] for s in rule_spans(text)] == ["AB1234567"]
+
+
+def test_faker_never_returns_original_across_all_categories():
+    faker = Faker(seed=42)
+    values = [
+        ("name", "Maya Tesfaye"),
+        ("email", "maya.tesfaye@company.com"),
+        ("phone", "+1 (202) 555-0147"),
+        ("address", "184 Cedar Lane, Portland, OR 97205"),
+        ("date_of_birth", "1992-04-18"),
+        ("id", "AB1234567"),
+        ("financial", "4111 1111 1111 1111"),
+        ("other", "@mayat"),
+    ]
+    fakes = []
+    for category, original in values:
+        fake = faker.value(category, original)
+        assert fake != original, f"{category}: fake matched original"
+        fakes.append(fake)
+    # No duplicate fakes across categories.
+    assert len(set(fakes)) == len(fakes)
+
+
+def test_faker_preserves_surrounding_punctuation():
+    faker = Faker(seed=7)
+    assert faker.value("name", "(Maya)").startswith("(")
+    assert faker.value("name", "(Maya)").endswith(")")
+    assert faker.value("name", "Tesfaye,").endswith(",")
+    assert faker.value("name", "'Samir'").startswith("'")
+    assert faker.value("name", "'Samir'").endswith("'")
