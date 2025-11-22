@@ -388,3 +388,119 @@ def test_status_and_filename_never_interpret_html(window):
 def test_closed_window_marks_inflight_worker_as_discarded(window):
     window.close()
     assert window.closed.is_set()
+
+
+# ---------- PDF ----------
+
+def make_test_pdf(path, pages=3, size=(200, 200)):
+    """Create a small multi-page PDF from white images."""
+    images = [Image.new("RGB", size, "white") for _ in range(pages)]
+    images[0].save(str(path), format="PDF", save_all=True, append_images=images[1:])
+    return path
+
+
+def extract_pdf_text(data):
+    """Extract all text from a PDF using pypdfium2."""
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(data)
+    text = ""
+    for page in pdf:
+        text += page.get_textpage().get_text_bounded()
+    return text
+
+
+def test_pdf_loads_and_processes_all_pages(window, tmp_path):
+    pdf_path = make_test_pdf(tmp_path / "test.pdf", pages=3)
+    window.load_file(str(pdf_path))
+    assert window.is_pdf
+    assert window.pdf_done
+    assert len(window.pdf_page_results) == 3
+    for result in window.pdf_page_results:
+        assert result is not None
+        img = Image.open(io.BytesIO(result))
+        assert img.size == (200, 200)
+    # The fake analyzer covers the top-left quarter, so some pixels should be black.
+    img = Image.open(io.BytesIO(window.pdf_page_results[0]))
+    pixels = list(img.getdata())
+    assert any(p == (0, 0, 0) for p in pixels)
+    assert window.result_count == 3  # one region per page
+
+
+def test_pdf_save_writes_pdf_with_no_text_layer(window, tmp_path, monkeypatch):
+    pdf_path = make_test_pdf(tmp_path / "input.pdf", pages=3)
+    window.load_file(str(pdf_path))
+    output = tmp_path / "output.pdf"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(output), "PDF"))
+    window.save_current()
+    assert output.exists()
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(output.read_bytes())
+    assert len(pdf) == 3
+    # No text layer: extracting text returns nothing.
+    text = extract_pdf_text(output.read_bytes())
+    assert text == ""
+
+
+def test_pdf_page_navigation(window, tmp_path):
+    pdf_path = make_test_pdf(tmp_path / "nav.pdf", pages=4)
+    window.load_file(str(pdf_path))
+    assert window.pdf_current_page == 0
+    assert not window.prev_button.isEnabled()
+    assert window.next_button.isEnabled()
+    window.next_page()
+    assert window.pdf_current_page == 1
+    assert window.prev_button.isEnabled()
+    assert window.next_button.isEnabled()
+    window.show_pdf_page(3)
+    assert window.pdf_current_page == 3
+    assert not window.next_button.isEnabled()
+    window.show_pdf_page(0)
+    assert window.pdf_current_page == 0
+
+
+def test_pdf_copy_copies_current_page_as_image(window, app, tmp_path):
+    pdf_path = make_test_pdf(tmp_path / "copy.pdf", pages=2)
+    window.load_file(str(pdf_path))
+    window.show_pdf_page(1)
+    window.copy_result()
+    clipped = app.clipboard().image()
+    assert not clipped.isNull()
+    # The redacted top-left quarter should be black.
+    assert clipped.pixelColor(10, 10).name() == "#000000"
+
+
+def test_pdf_save_refuses_original_filename(window, tmp_path, monkeypatch):
+    original = make_test_pdf(tmp_path / "original.pdf", pages=2)
+    window.load_file(str(original))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(original), "PDF"))
+    window.save_current()
+    assert "preserve" in window.status.text()
+
+
+def test_pdf_mode_switch_rerenders_all_pages(window, tmp_path):
+    pdf_path = make_test_pdf(tmp_path / "modes.pdf", pages=3)
+    window.load_file(str(pdf_path))
+    redacted = list(window.pdf_page_results)
+    window.set_mode("anonymize")
+    assert window.pdf_page_results != redacted
+    # Anonymized pages should have non-black text in the redaction area.
+    img = Image.open(io.BytesIO(window.pdf_page_results[0]))
+    pixels = list(img.getdata())
+    assert any(any(c > 100 for c in p) for p in pixels[:1000])
+
+
+def test_pdf_too_many_pages_raises(window, tmp_path, monkeypatch):
+    pdf_path = make_test_pdf(tmp_path / "big.pdf", pages=51)
+    window.load_file(str(pdf_path))
+    assert "at most 50 pages" in window.status.text()
+    assert not window.is_pdf
+
+
+def test_new_clears_pdf_state(window, tmp_path):
+    pdf_path = make_test_pdf(tmp_path / "clear.pdf", pages=3)
+    window.load_file(str(pdf_path))
+    assert window.is_pdf
+    window.new()
+    assert not window.is_pdf
+    assert window.pdf_pages is None
+    assert window.kind == "empty"
