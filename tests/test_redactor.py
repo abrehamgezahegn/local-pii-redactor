@@ -4,9 +4,10 @@ import json
 import pytest
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
-from pii_redactor.core import Box, Entity, RedactionError, Word, deduplicate, document_text, entity_regions, load_image, ocr, png_bytes, redact, rule_regions
+from pii_redactor.core import Box, Entity, RedactionError, Word, deduplicate, document_text, entity_regions, load_image, ocr, png_bytes, redact, rule_regions, text_map
 from pii_redactor.model import Ollama, local_url
 from pii_redactor.pipeline import analyze
+from pii_redactor.text import clean_text
 
 
 def sample_image():
@@ -257,3 +258,27 @@ def test_document_text_handles_empty_words():
     assert document_text([]) == ""
     single = [Word("Hello", Box(x=0, y=0, width=30, height=10), (1, 1, 1))]
     assert document_text(single) == "Hello"
+
+
+# ---------- text helpers ----------
+
+def test_clean_text_normalizes_line_endings():
+    assert clean_text("hello\r\nworld") == "hello\nworld"
+    assert clean_text("hello\rworld") == "hello\nworld"
+    assert clean_text("hello\nworld") == "hello\nworld"
+    assert clean_text("no line breaks") == "no line breaks"
+
+
+def test_text_map_builds_correct_text_and_spans():
+    words = [
+        Word("Hello", Box(x=0, y=0, width=30, height=10), (1, 1, 1)),
+        Word("World", Box(x=40, y=0, width=30, height=10), (1, 1, 1)),
+        Word("Again", Box(x=0, y=20, width=30, height=10), (1, 1, 2)),
+    ]
+    text, spans = text_map(words)
+    assert text == "hello world\nagain"
+    assert spans == [(0, 5), (6, 11), (12, 17)]
+    # Verify spans index back into the text correctly
+    assert text[spans[0][0]:spans[0][1]] == "hello"
+    assert text[spans[1][0]:spans[1][1]] == "world"
+    assert text[spans[2][0]:spans[2][1]] == "again"
