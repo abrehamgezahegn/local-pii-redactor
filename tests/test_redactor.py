@@ -4,7 +4,7 @@ import json
 import pytest
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
-from pii_redactor.core import Box, Entity, RedactionError, Word, deduplicate, entity_regions, load_image, ocr, png_bytes, redact, rule_regions
+from pii_redactor.core import Box, Entity, RedactionError, Word, deduplicate, document_text, entity_regions, load_image, ocr, png_bytes, redact, rule_regions
 from pii_redactor.model import Ollama, local_url
 from pii_redactor.pipeline import analyze
 
@@ -197,3 +197,23 @@ def test_real_tesseract_finds_fixture_text():
     assert "Maya Tesfaye" in text
     assert "maya.tesfaye@example.com" in text
     assert "AB1234567" in text
+
+
+def test_document_text_preserves_capitalization_and_groups_by_line():
+    words = [
+        Word("Name:", Box(x=0, y=0, width=40, height=10), (1, 1, 1)),
+        Word("Maya", Box(x=50, y=0, width=30, height=10), (1, 1, 1)),
+        Word("Tesfaye", Box(x=90, y=0, width=40, height=10), (1, 1, 1)),
+        Word("Email:", Box(x=0, y=20, width=40, height=10), (1, 1, 2)),
+        Word("maya@example.com", Box(x=50, y=20, width=100, height=10), (1, 1, 2)),
+    ]
+    text = document_text(words)
+    assert text == "Name: Maya Tesfaye\nEmail: maya@example.com"
+    # Capitalization is preserved (unlike text_map which casefolds)
+    assert "Maya" in text and "maya" in text
+
+
+def test_document_text_handles_empty_words():
+    assert document_text([]) == ""
+    single = [Word("Hello", Box(x=0, y=0, width=30, height=10), (1, 1, 1))]
+    assert document_text(single) == "Hello"
