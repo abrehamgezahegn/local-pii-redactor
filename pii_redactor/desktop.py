@@ -96,7 +96,12 @@ class UploadArea(QPushButton):
 
     def update_preview(self):
         if self.image:
-            self.picture.setPixmap(self.image.scaled(self.width() - 40, self.height() - 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            # Scale to device pixels so the preview stays sharp on Retina displays.
+            ratio = self.devicePixelRatioF()
+            scaled = self.image.scaled(round((self.width() - 40) * ratio), round((self.height() - 40) * ratio),
+                                       Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(ratio)
+            self.picture.setPixmap(scaled)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

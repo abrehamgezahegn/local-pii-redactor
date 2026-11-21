@@ -295,12 +295,18 @@ def test_preview_expands_with_window(window, app, size, image_size):
     window.show()
     app.processEvents()
     assert window.upload.height() >= window.height() - 220
-    shown = window.upload.picture.pixmap()
+    pixmap = window.upload.picture.pixmap()
+    shown = pixmap.deviceIndependentSize()
     assert shown.width() > 0 and shown.height() > 0
     assert shown.width() <= window.upload.width()
     assert shown.height() <= window.upload.height()
     expected = min((window.upload.width() - 40) / image_size[0], (window.upload.height() - 40) / image_size[1])
     assert abs(shown.height() - round(image_size[1] * expected)) <= 2
+    # Sharp on Retina: the pixmap carries one pixel per device pixel, not per point.
+    ratio = window.upload.devicePixelRatioF()
+    assert pixmap.devicePixelRatio() == ratio
+    if image_size[0] >= 1000:
+        assert abs(pixmap.width() - shown.width() * ratio) <= 2
 
 
 # ---------- saving and safety ----------
