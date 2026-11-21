@@ -2,6 +2,16 @@
 
 A small desktop app that removes personal information from images or text. It uses your installed `llama3.2:latest` model in Ollama, Tesseract for text locations, and Pillow to draw over the original pixels.
 
+<p align="center">
+  <img src="docs/screenshots/image-anonymized.png" width="520" alt="A visitor registration form where the name, email, phone, address, birth date and passport number are covered by black markers showing fictional replacement values">
+</p>
+
+| Redact | Anonymize text | Start screen |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/image-redacted.png" width="280" alt="The same form with every personal value covered by a solid black marker"> | <img src="docs/screenshots/text-anonymized.png" width="280" alt="An email draft and its anonymized version, with names, contact details, passport, birth date and address swapped for fictional ones"> | <img src="docs/screenshots/start.png" width="280" alt="The start screen: paste, drop or type, with Redact and Anonymize at the top"> |
+
+All screenshots come from real scans of fictional sample data.
+
 ## Use the Mac app
 
 Open **Local Redact.app** (built into `dist/` by PyInstaller, see below).
