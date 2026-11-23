@@ -398,8 +398,9 @@ class RedactorWindow(QWidget):
     def load_file(self, filename: str):
         try:
             path = Path(filename)
-            if path.stat().st_size > MAX_BYTES:
-                raise RedactionError("Choose a file smaller than 20 MB.")
+            size = path.stat().st_size
+            if size > MAX_BYTES:
+                raise RedactionError(f"Choose a file smaller than 20 MB. This one is {size / (1024 * 1024):.1f} MB.")
             if path.suffix.lower() in TEXT_FILES:
                 self.load_text(path.read_text(encoding="utf-8", errors="replace"))
                 return
