@@ -139,6 +139,19 @@ def test_merge_keeps_longest_category():
     assert merged[0].source == "llama + pattern"
 
 
+def test_merge_handles_nested_and_adjacent_spans():
+    # Fully nested: inner span absorbed, outer category kept if it is the longest.
+    nested = merge_spans([Span(0, 20, "name", "llama"), Span(5, 10, "email", "pattern")])
+    assert [(s.start, s.end, s.category) for s in nested] == [(0, 20, "name")]
+    assert nested[0].source == "llama + pattern"
+    # Adjacent (touching, not overlapping) spans stay separate.
+    adjacent = merge_spans([Span(0, 5, "name", "llama"), Span(5, 12, "id", "pattern")])
+    assert [(s.start, s.end) for s in adjacent] == [(0, 5), (5, 12)]
+    # Disjoint spans stay separate.
+    disjoint = merge_spans([Span(0, 5, "name", "llama"), Span(10, 15, "id", "pattern")])
+    assert [(s.start, s.end) for s in disjoint] == [(0, 5), (10, 15)]
+
+
 def test_rule_spans_trim_whitespace():
     text = "Passport: AB1234567   "
     assert [text[s.start:s.end] for s in rule_spans(text)] == ["AB1234567"]
