@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import sys
 import threading
 from pathlib import Path
 
+import pypdfium2 as pdfium
 from PIL import Image
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QObject, QSaveFile, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
@@ -23,6 +25,8 @@ LANGUAGE = os.environ.get("PII_LANGUAGE", "eng")
 TEXT_FILES = {".txt", ".md", ".csv", ".log", ".json", ".eml"}
 TYPING_PAUSE_MS = 1200
 PAGES = {"empty": 0, "image": 1, "text": 2}
+MAX_PDF_PAGES = 50
+PDF_RENDER_DPI = 200
 
 
 def scan_image(image: Image.Image) -> dict:
@@ -32,6 +36,52 @@ def scan_image(image: Image.Image) -> dict:
     if not any(region["boxes"] for region in result["regions"]):
         raise RedactionError("No personal information was detected. Check the image yourself or try a clearer image.")
     return result
+
+
+def render_pdf_pages(data: bytes) -> list[Image.Image]:
+    """Render each page of a PDF to an RGB image, enforcing page and pixel limits."""
+    document = pdfium.PdfDocument(data)
+    count = len(document)
+    if count > MAX_PDF_PAGES:
+        raise RedactionError(f"PDFs can have at most {MAX_PDF_PAGES} pages. This one has {count}.")
+    pages = []
+    for i in range(count):
+        page = document[i]
+        bitmap = page.render(scale=PDF_RENDER_DPI / 72)
+        image = bitmap.to_pil().convert("RGB")
+        if image.width * image.height > MAX_PIXELS:
+            raise RedactionError(f"Page {i + 1} is too large to process. Use a PDF with smaller pages.")
+        pages.append(image)
+    return pages
+
+
+def make_pdf(page_images: list[Image.Image]) -> bytes:
+    """Create a new PDF from page images, with no text layer, metadata or annotations."""
+    buffer = io.BytesIO()
+    if len(page_images) == 1:
+        page_images[0].save(buffer, format="PDF")
+    else:
+        page_images[0].save(buffer, format="PDF", save_all=True, append_images=page_images[1:])
+    return buffer.getvalue()
+
+
+def scan_pdf_page(image: Image.Image) -> dict:
+    """Scan a PDF page; tolerate pages with no PII, but fail if the model is unavailable and patterns found nothing."""
+    result = analyze(image, MODEL, LANGUAGE)
+    if not result["complete"] and not any(r["boxes"] for r in result["regions"]):
+        raise RedactionError(" ".join(result["warnings"]) + " The PDF could not be processed.")
+    return result
+
+
+def render_pdf_page(image: Image.Image, analysis: dict, mode: str, faker: Faker) -> tuple[bytes, int, str]:
+    regions = [Region(**region) for region in analysis["regions"]]
+    if not regions:
+        return png_bytes(image), 0, " ".join(analysis["warnings"])
+    if mode == "anonymize":
+        output = anonymize_image(image, regions, faker, padding=5)
+    else:
+        output = redact(image, [box for region in regions for box in region.boxes], padding=5)
+    return png_bytes(output), len(regions), " ".join(analysis["warnings"])
 
 
 def render_image(image: Image.Image, analysis: dict, mode: str, faker: Faker) -> tuple[bytes, int, str]:
@@ -68,6 +118,7 @@ def image_fingerprint(image: QImage) -> str:
 class WorkerSignals(QObject):
     scanned = Signal(int, str, object)
     failed = Signal(int, str, str)
+    progress = Signal(str)
 
 
 class UploadArea(QPushButton):
@@ -153,6 +204,13 @@ class RedactorWindow(QWidget):
         self.source: Image.Image | None = None
         self.source_png: bytes | None = None
         self.source_path: Path | None = None
+        self.is_pdf = False
+        self.pdf_pages: list[Image.Image] | None = None
+        self.pdf_page_results: list[bytes] | None = None
+        self.pdf_analyses: list[dict] | None = None
+        self.pdf_current_page = 0
+        self.pdf_done = False
+        self.pdf_path: Path | None = None
         self.image_analysis: dict | None = None
         self.image_faker = Faker()
         self.result_data: bytes | None = None
@@ -172,6 +230,7 @@ class RedactorWindow(QWidget):
         self.signals = WorkerSignals(self)
         self.signals.scanned.connect(self.scanned)
         self.signals.failed.connect(self.failed)
+        self.signals.progress.connect(self.on_progress)
         self.typing_timer = QTimer(self)
         self.typing_timer.setSingleShot(True)
         self.typing_timer.setInterval(TYPING_PAUSE_MS)
@@ -230,6 +289,22 @@ class RedactorWindow(QWidget):
 
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
+        self.prev_button = QPushButton("\u2039")
+        self.prev_button.setToolTip("Previous page")
+        self.prev_button.setFixedWidth(32)
+        self.prev_button.clicked.connect(lambda: self.show_pdf_page(self.pdf_current_page - 1))
+        self.prev_button.hide()
+        bottom.addWidget(self.prev_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.page_label = QLabel("")
+        self.page_label.setObjectName("hint")
+        self.page_label.hide()
+        bottom.addWidget(self.page_label, 0, Qt.AlignmentFlag.AlignTop)
+        self.next_button = QPushButton("\u203a")
+        self.next_button.setToolTip("Next page")
+        self.next_button.setFixedWidth(32)
+        self.next_button.clicked.connect(lambda: self.show_pdf_page(self.pdf_current_page + 1))
+        self.next_button.hide()
+        bottom.addWidget(self.next_button, 0, Qt.AlignmentFlag.AlignTop)
         self.status = QLabel("")
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
@@ -288,6 +363,7 @@ class RedactorWindow(QWidget):
             (QKeySequence.StandardKey.New, self.new), (QKeySequence("Ctrl+Return"), self.start_scan),
             (QKeySequence("Ctrl+Meta+F" if sys.platform == "darwin" else "F11"), self.toggle_fullscreen),
             (QKeySequence("Esc"), self.exit_fullscreen),
+            (QKeySequence("Ctrl+Left"), self.prev_page), (QKeySequence("Ctrl+Right"), self.next_page),
         ]
         self.shortcuts = []
         for key, action in shortcuts:
@@ -365,6 +441,8 @@ class RedactorWindow(QWidget):
         self.refresh()
 
     def has_result(self) -> bool:
+        if self.is_pdf:
+            return self.pdf_done
         if self.kind == "image":
             return self.result_data is not None
         if self.kind == "text":
@@ -376,6 +454,12 @@ class RedactorWindow(QWidget):
         self.copy_button.setVisible(result)
         self.save_button.setVisible(result)
         self.progress.setVisible(self.busy)
+        nav = self.is_pdf and self.pdf_pages and len(self.pdf_pages) > 1 and not self.busy
+        self.prev_button.setVisible(nav)
+        self.next_button.setVisible(nav)
+        self.page_label.setVisible(nav)
+        if nav:
+            self.page_label.setText(f"Page {self.pdf_current_page + 1} of {len(self.pdf_pages)}")
         if not self.busy and self.kind == "empty" and not self.status.property("tone"):
             self.status.setText("Processed on this computer with Llama. Review results before sharing.")
 
@@ -391,7 +475,7 @@ class RedactorWindow(QWidget):
 
     # ---------- input ----------
     def choose_image(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Choose an image or text file", "", "Images and text (*.png *.jpg *.jpeg *.heic *.heif *.avif *.webp *.gif *.bmp *.tif *.tiff *.txt *.md)")
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose an image or text file", "", "Images, text and PDF (*.png *.jpg *.jpeg *.heic *.heif *.avif *.webp *.gif *.bmp *.tif *.tiff *.txt *.md *.pdf)")
         if filename:
             self.load_file(filename)
 
@@ -404,10 +488,41 @@ class RedactorWindow(QWidget):
             if path.suffix.lower() in TEXT_FILES:
                 self.load_text(path.read_text(encoding="utf-8", errors="replace"))
                 return
+            if path.suffix.lower() == ".pdf":
+                self.load_pdf(path.read_bytes(), path.name, path)
+                return
             image = load_image(path.read_bytes())
             self.set_source(image, path.name, path)
         except (RedactionError, OSError) as error:
             self.say(str(error), error=True)
+
+    def load_pdf(self, data: bytes, name: str, path: Path | None = None):
+        pages = render_pdf_pages(data)
+        self.is_pdf = True
+        self.pdf_pages = pages
+        self.pdf_path = path
+        self.pdf_current_page = 0
+        self.pdf_page_results = [None] * len(pages)
+        self.pdf_analyses = [None] * len(pages)
+        self.pdf_done = False
+        self.set_source(pages[0], name, path)
+
+    def show_pdf_page(self, index: int):
+        if not self.pdf_pages or not (0 <= index < len(self.pdf_pages)):
+            return
+        self.pdf_current_page = index
+        self.source = self.pdf_pages[index]
+        self.source_png = png_bytes(self.source)
+        if self.pdf_page_results and self.pdf_page_results[index] is not None:
+            self.result_data = self.pdf_page_results[index]
+            self.upload.show_image(self.result_data)
+        else:
+            self.result_data = None
+            self.upload.show_image(self.source_png)
+        if len(self.pdf_pages) > 1:
+            self.page_label.setText(f"Page {index + 1} of {len(self.pdf_pages)}")
+        self.prev_button.setEnabled(index > 0)
+        self.next_button.setEnabled(index < len(self.pdf_pages) - 1)
 
     def set_source(self, image: Image.Image, name: str, path: Path | None = None, scan: bool = True):
         self.source = image
@@ -571,6 +686,17 @@ class RedactorWindow(QWidget):
         self.mode = mode
         self.settings.setValue("mode", mode)
         # Reuse the last scan: switching modes re-renders instantly without asking the model again.
+        if self.is_pdf and self.pdf_pages and self.pdf_analyses:
+            faker = Faker()
+            self.pdf_page_results = []
+            for i, page in enumerate(self.pdf_pages):
+                if self.pdf_analyses[i] is not None:
+                    data, count, warning = render_pdf_page(page, self.pdf_analyses[i], mode, faker)
+                    self.pdf_page_results.append(data)
+                else:
+                    self.pdf_page_results.append(None)
+            self.image_faker = faker
+            self.show_pdf_page(self.pdf_current_page)
         if self.image_analysis is not None and self.source is not None:
             self.show_result(*render_image(self.source, self.image_analysis, mode, self.image_faker))
         if self.text_analysis is not None:
@@ -587,6 +713,13 @@ class RedactorWindow(QWidget):
         self.busy = False
         self.typing_timer.stop()
         self.source = self.source_png = self.source_path = self.image_analysis = self.result_data = None
+        self.is_pdf = False
+        self.pdf_pages = None
+        self.pdf_page_results = None
+        self.pdf_analyses = None
+        self.pdf_current_page = 0
+        self.pdf_done = False
+        self.pdf_path = None
         self.loading_text = True
         self.text_input.clear()
         self.loading_text = False
@@ -605,6 +738,9 @@ class RedactorWindow(QWidget):
     def start_scan(self):
         self.typing_timer.stop()
         kind = self.kind
+        if kind == "image" and self.is_pdf:
+            self.start_pdf_scan()
+            return
         if kind == "image" and self.source is not None:
             self.image_analysis = None
             self.result_data = None
@@ -642,12 +778,86 @@ class RedactorWindow(QWidget):
 
         self.launch(work)
 
+    def start_pdf_scan(self):
+        if not self.pdf_pages:
+            return
+        self.pdf_done = False
+        self.result_data = None
+        self.upload.show_image(self.source_png)
+        self.say("Finding personal information on this computer…")
+        self.generation += 1
+        generation = self.generation
+        pages = [p.copy() for p in self.pdf_pages]
+        mode = self.mode
+        faker = Faker()
+        signals, closed = self.signals, self.closed
+
+        def work():
+            try:
+                results, analyses = [], []
+                total_count, warnings = 0, []
+                for i, page in enumerate(pages):
+                    if closed.is_set():
+                        return
+                    signals.progress.emit(f"Page {i + 1} of {len(pages)}…")
+                    analysis = scan_pdf_page(page)
+                    data, count, warning = render_pdf_page(page, analysis, mode, faker)
+                    results.append(data)
+                    analyses.append(analysis)
+                    total_count += count
+                    if warning:
+                        warnings.append(warning)
+                if not closed.is_set():
+                    signals.scanned.emit(generation, "pdf", {
+                        "results": results, "analyses": analyses,
+                        "count": total_count, "warnings": " ".join(warnings),
+                    })
+            except (RedactionError, OSError) as error:
+                if not closed.is_set():
+                    signals.failed.emit(generation, "pdf", str(error))
+            except Exception:
+                if not closed.is_set():
+                    signals.failed.emit(generation, "pdf", "The PDF could not be processed. Check that Ollama is running.")
+
+        self.busy = True
+        self.refresh()
+        self.launch(work)
+
+    def on_progress(self, message: str):
+        if self.busy:
+            self.say(message)
+
+    def prev_page(self):
+        if self.is_pdf:
+            self.show_pdf_page(self.pdf_current_page - 1)
+
+    def next_page(self):
+        if self.is_pdf:
+            self.show_pdf_page(self.pdf_current_page + 1)
+
     def scanned(self, generation: int, kind: str, analysis: dict):
-        if generation != self.generation or kind != self.kind:
+        if generation != self.generation:
+            return
+        if kind == "pdf":
+            if not self.is_pdf:
+                return
+        elif kind != self.kind:
             return  # the input changed while this scan ran
         self.busy = False
         try:
-            if kind == "image":
+            if kind == "pdf":
+                self.pdf_page_results = analysis["results"]
+                self.pdf_analyses = analysis["analyses"]
+                self.image_faker = Faker()
+                self.pdf_done = True
+                self.result_count = analysis["count"]
+                self.result_warning = analysis["warnings"]
+                self.show_pdf_page(0)
+                self.refresh()
+                if self.auto_copy:
+                    self.copy_to_clipboard()
+                self.say(self.summary(analysis["count"], "regions", analysis["warnings"]))
+            elif kind == "image":
                 self.image_analysis = analysis
                 self.image_faker = Faker()
                 self.show_result(*render_image(self.source, analysis, self.mode, self.image_faker))
@@ -705,12 +915,18 @@ class RedactorWindow(QWidget):
     def show_original(self):
         if self.result_data is not None and self.source_png is not None:
             self.upload.show_image(self.source_png)
-            self.filename.setText("Original · Release to see the result")
+            if self.is_pdf:
+                self.filename.setText(f"Original · Page {self.pdf_current_page + 1} of {len(self.pdf_pages)} · Release to see the result")
+            else:
+                self.filename.setText("Original · Release to see the result")
 
     def show_processed(self):
         if self.result_data is not None:
             self.upload.show_image(self.result_data)
-            self.filename.setText(f"{self.verb().capitalize()} preview · Hold to compare with the original · Double-click for full screen")
+            if self.is_pdf:
+                self.filename.setText(f"{self.verb().capitalize()} preview · Page {self.pdf_current_page + 1} of {len(self.pdf_pages)} · Hold to compare with the original · Double-click for full screen")
+            else:
+                self.filename.setText(f"{self.verb().capitalize()} preview · Hold to compare with the original · Double-click for full screen")
 
     def copy_to_clipboard(self) -> bool:
         if self.kind == "image" and self.result_data is not None:
@@ -726,7 +942,8 @@ class RedactorWindow(QWidget):
     def copy_result(self):
         if self.copy_to_clipboard():
             warning = self.result_warning if self.kind == "image" else self.text_warning
-            self.say(f"Copied the {self.verb()} {self.kind}, ready to paste. {warning}")
+            noun = "page" if self.is_pdf else self.kind
+            self.say(f"Copied the {self.verb()} {noun}, ready to paste. {warning}")
 
     def toggle_fullscreen(self):
         if self.kind != "image":
@@ -748,7 +965,9 @@ class RedactorWindow(QWidget):
 
     # ---------- saving ----------
     def save_current(self):
-        if self.kind == "image" and self.result_data is not None:
+        if self.is_pdf and self.pdf_done:
+            self.save_pdf()
+        elif self.kind == "image" and self.result_data is not None:
             self.save_result(self.result_data, self.result_count)
         elif self.kind == "text" and self.result_text is not None:
             self.save_text(self.result_text, self.text_count)
@@ -763,7 +982,10 @@ class RedactorWindow(QWidget):
             raise RedactionError("Saving failed. Choose Save to try another location.")
 
     def default_name(self, suffix: str) -> str:
-        stem = self.source_path.stem if self.source_path else ("image" if suffix == ".png" else "text")
+        if self.is_pdf:
+            stem = self.pdf_path.stem if self.pdf_path else "document"
+        else:
+            stem = self.source_path.stem if self.source_path else ("image" if suffix == ".png" else "text")
         return str(Path(self.settings.value("save_dir", str(Path.home() / "Downloads"))) / f"{stem}-{self.verb()}{suffix}")
 
     def save_result(self, data: bytes, count: int):
@@ -796,6 +1018,26 @@ class RedactorWindow(QWidget):
             self._write(path, text.encode("utf-8"))
             self.settings.setValue("save_dir", str(path.parent))
             self.say(f"Saved {path.name} with {count} replaced values. {self.text_warning}")
+        except (RedactionError, OSError) as error:
+            self.say(str(error), error=True)
+
+    def save_pdf(self):
+        filename, _ = QFileDialog.getSaveFileName(self, "Save PDF", self.default_name(".pdf"), "PDF document (*.pdf)")
+        if not filename:
+            self.say("Nothing was saved. The result is still here.")
+            return
+        path = Path(filename)
+        try:
+            if path.suffix.lower() != ".pdf":
+                raise RedactionError("Use a filename ending in .pdf.")
+            if self.pdf_path and path.resolve() == self.pdf_path.resolve():
+                raise RedactionError("Choose a different filename to preserve your original PDF.")
+            page_images = [Image.open(io.BytesIO(data)) for data in self.pdf_page_results]
+            pdf_bytes = make_pdf(page_images)
+            self._write(path, pdf_bytes)
+            self.settings.setValue("save_dir", str(path.parent))
+            changes = "replacements" if self.mode == "anonymize" else "redactions"
+            self.say(f"Saved {path.name} with {self.result_count} {changes} across {len(self.pdf_page_results)} pages. {self.result_warning}")
         except (RedactionError, OSError) as error:
             self.say(str(error), error=True)
 

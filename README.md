@@ -18,11 +18,11 @@ Open **Local Redact.app** (built into `dist/` by PyInstaller, see below).
 
 Give it an image or text and it does the rest. There is no Submit button.
 
-- **Paste (⌘V), drop, or choose** an image or a `.txt` file. Processing starts immediately.
+- **Paste (⌘V), drop, or choose** an image, a `.txt` file, or a `.pdf` file. Processing starts immediately.
 - **Start typing** anywhere on the start screen to get a text box. Text is processed when you pause, or right away with ⌘↩.
 - **Screenshots:** copy one to the clipboard (⌃⇧⌘4) and switch to the app. A new clipboard image is picked up and processed automatically. The app's own copied results are never picked up again, and it never interrupts text you are typing.
 - With **Auto-copy result** on (the default), every finished result goes on the clipboard, ready to paste where you were going. Otherwise use **Copy** (⌘C).
-- **Save…** (⌘S) suggests `<original name>-redacted.png` (or `.txt`) in the folder you last saved to.
+- **Save…** (⌘S) suggests `<original name>-redacted.png` (or `.txt` or `.pdf`) in the folder you last saved to.
 - **New** (⌘N) clears everything. Pasting something new also replaces the current item, even mid-scan.
 
 Pick **Redact** or **Anonymize** at the top. The app remembers your choice, and switching after a scan re-renders instantly without scanning again.
@@ -38,7 +38,7 @@ Ollama must be running. This computer already has the model and Tesseract instal
 
 ## Supported images
 
-PNG, JPEG, WebP, BMP and single-page TIFF, up to 20 MB and 24 million pixels. Scanning defaults to English. Animated and multi-page images are rejected. PDFs and batch processing are outside this version's scope.
+PNG, JPEG, WebP, BMP and single-page TIFF, up to 20 MB and 24 million pixels. PDFs are supported up to 50 pages — each page is rendered to an image and processed through the same pipeline. Scanning defaults to English. Animated and multi-page images are rejected. Batch processing is outside this version's scope.
 
 The app detects names, emails, phones, addresses, birth dates, IDs and financial details. Pattern checks supplement Llama. If text recognition or the model fails, the app does not save a partial result. If no personal information is found, it reports that and saves nothing.
 
@@ -46,7 +46,7 @@ The app detects names, emails, phones, addresses, birth dates, IDs and financial
 
 Images stay on this computer. The app sends only extracted text to a loopback Ollama endpoint. It rejects remote-model metadata and cloud model names, and disables HTTP proxies and redirects. There are no analytics or external UI assets.
 
-Tesseract receives image pixels through stdin and returns text through stdout. The app keeps no upload history or OCR files. It writes only the PNG you choose to save. Export produces a new RGB image without copied EXIF, GPS, comments or hidden source-image layers.
+Tesseract receives image pixels through stdin and returns text through stdout. The app keeps no upload history or OCR files. It writes only the PNG you choose to save. Export produces a new RGB image without copied EXIF, GPS, comments or hidden source-image layers. PDF export creates a fresh PDF from the processed page images only — no text layer, metadata, attachments or annotations from the original are carried over.
 
 This does not guarantee secure memory erasure. OS swap and your local Ollama configuration remain outside the app's control. Use a trusted local Ollama installation.
 
