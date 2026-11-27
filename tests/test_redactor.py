@@ -110,6 +110,28 @@ def test_local_url_ignores_proxy_environment():
     assert local_url("http://[::1]:11434/") == "http://[::1]:11434"
 
 
+@pytest.mark.parametrize("url,expected", [
+    ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+    ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+    ("http://[::1]:11434", "http://[::1]:11434"),
+    ("http://[0:0:0:0:0:0:0:1]:11434", "http://[0:0:0:0:0:0:0:1]:11434"),
+    ("http://localhost", "http://127.0.0.1:11434"),  # default port
+])
+def test_local_url_accepts_loopback_variants(url, expected):
+    assert local_url(url) == expected
+
+
+@pytest.mark.parametrize("url", [
+    "http://[::1]:11434/path",  # path not allowed
+    "http://[::1]:11434?x=1",   # query not allowed
+    "http://[fc00::1]:11434",   # not loopback (unique local)
+    "http://[fe80::1]:11434",    # not loopback (link-local)
+])
+def test_local_url_rejects_non_loopback_ipv6(url):
+    with pytest.raises(RedactionError):
+        local_url(url)
+
+
 def test_remote_model_alias_never_receives_document(monkeypatch):
     client = Ollama()
     calls = []
